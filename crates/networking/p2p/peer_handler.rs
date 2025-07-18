@@ -198,13 +198,16 @@ impl PeerHandler {
 
         // 2) partition the amount of headers in `K` tasks
         let chunk_limit = block_count / chunk_count as u64;
-
+        let chunk_limit_remainder = block_count % chunk_count as u64;
         // list of tasks to be executed
         let mut tasks_queue_not_started = VecDeque::<(u64, u64)>::with_capacity(chunk_count);
+        let mut current_chunk_limit = 0;
         for i in 0..(chunk_count as u64) {
-            tasks_queue_not_started.push_back((i * chunk_limit, chunk_limit));
+            current_chunk_limit = i * chunk_limit;
+            tasks_queue_not_started.push_back((current_chunk_limit, chunk_limit));
         }
-
+        tasks_queue_not_started.push_back((current_chunk_limit + chunk_limit, chunk_limit_remainder));
+        info!("Last task added, from: {}, asking for {}", current_chunk_limit + chunk_limit, chunk_limit_remainder);
         let mut downloaded_count = 0_u64;
 
         // channel to send the tasks to the peers
@@ -224,7 +227,7 @@ impl PeerHandler {
                 task_receiver.try_recv()
             {
                 if headers.is_empty() {
-                    warn!("Failed to download chunk from peer {peer_id}");
+                    // warn!("Failed to download chunk from peer {peer_id}");
 
                     downloaders.entry(peer_id).and_modify(|downloader_is_free| {
                         *downloader_is_free = true; // mark the downloader as free
@@ -442,7 +445,7 @@ impl PeerHandler {
         startblock: u64,
         chunk_limit: u64,
     ) -> Result<Vec<BlockHeader>, String> {
-        info!("Requesting block headers from peer {peer_id}");
+        // info!("Requesting block headers from peer {peer_id}");
         let request_id = rand::random();
         let request = RLPxMessage::GetBlockHeaders(GetBlockHeaders {
             id: request_id,
