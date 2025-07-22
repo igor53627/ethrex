@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, BinaryHeap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -65,15 +65,15 @@ type Score = i32;
 
 #[derive(Debug, Clone)]
 struct PeerStatus {
-    peer_id: H256,
     channels: PeerChannels,
+    score: Score,
     is_free: bool,
 }
 
 #[derive(Debug)]
 pub struct Downloader {
     /// PeerId => (PeerChannels, is_free)
-    pub peers: BTreeMap<Score, PeerStatus>,
+    pub peers: BTreeMap<H256, PeerStatus>,
 }
 
 impl Downloader {
@@ -86,25 +86,78 @@ impl Downloader {
     pub fn from_peer_table(peer_table: Vec<(H256, Score, PeerChannels)>) -> Self {
         let mut peers = BTreeMap::new();
         for (peer_id, score, channels) in peer_table {
-            peers.insert(score, PeerStatus{peer_id, channels, is_free: true});
+            peers.insert(
+                peer_id,
+                PeerStatus {
+                    score,
+                    channels,
+                    is_free: true,
+                },
+            );
         }
         Self { peers }
     }
 
-    pub fn insert_peer(&mut self, peer_id: H256, peer_channels: PeerChannels) {
-        if self.peers.contains_key(&peer_id) {
-            return;
+    /// Updates the peer list using a new peer table.
+    /// Only peers present in the new peer table will be retained.  
+    /// For peers that exist in both the previous and new tables, their previous status  
+    /// (e.g. whether they are marked as free or not) will be preserved.
+    pub fn update_peers(&mut self, peer_table: Vec<(H256, Score, PeerChannels)>) {
+        let mut new_peers = BTreeMap::new();
+
+        for (peer_id, score, channels) in peer_table {
+            let mut is_free = true;
+            // Check if the peer was present in the previous table
+            // In that case, preserve its status
+            if let Some(peer) = self.peers.get(&peer_id) {
+                is_free = peer.is_free;
+            }
+            new_peers.insert(
+                peer_id,
+                PeerStatus {
+                    score,
+                    channels,
+                    is_free,
+                },
+            );
         }
-        self.peers.insert(peer_id, (peer_channels, true));
+        self.peers = new_peers;
     }
 
-    pub fn remove_peer(&mut self, peer_id: H256) {
-        self.peers.shift_remove(&peer_id);
+    pub fn get_best_scoring_available_peer(&mut self) -> Option<(H256, PeerChannels)> {
+        let mut candidate_peer_id = H256::zero();
+        let mut candidate_score = i32::MIN;
+        for (peer_id, peer) in &self.peers {
+            if peer.is_free && peer.score > candidate_score {
+                candidate_score = peer.score;
+                candidate_peer_id = peer_id.clone();
+            }
+        }
+        // Mark the peer as "not free"
+        self.peers
+            .entry(candidate_peer_id)
+            .and_modify(|peer| peer.is_free = false);
+
+        let Some(peer) = self.peers.get(&candidate_peer_id) else {
+            return None;
+        };
+        // TODO: remove this log
+        info!(
+            "Got peer {} with score {}",
+            candidate_peer_id, candidate_score
+        );
+        Some((candidate_peer_id, peer.channels.clone()))
     }
 
-    pub fn get_peer(&self) -> Option<&(PeerChannels, bool)> {
-        for peer in self.peers
-        self.peers.get(&peer_id)
+    pub fn set_peer_as_free_and_update_score(&mut self, peer_id: H256, score: Score) {
+        self.peers.entry(peer_id).and_modify(|peer| {
+            peer.is_free = true;
+            peer.score = score;
+        });
+    }
+
+    pub fn contains_peer(&self, peer_id: &H256) -> bool {
+        self.peers.contains_key(peer_id)
     }
 }
 
@@ -187,8 +240,9 @@ impl PeerHandler {
 
         let mut ret = Vec::<BlockHeader>::new();
 
-        let peers_table = self.peer_table.get_peer_channels_with_score
-            (&SUPPORTED_ETH_CAPABILITIES)
+        let peers_table = self
+            .peer_table
+            .get_peer_channels_with_score(&SUPPORTED_ETH_CAPABILITIES)
             .await;
 
         let sync_head_number = Arc::new(Mutex::new(0_u64));
@@ -284,10 +338,9 @@ impl PeerHandler {
                     Ok((headers, peer_id, peer_channel, startblock, previous_chunk_limit)) => {
                         if headers.is_empty() {
                             self.peer_table.penalize_peer(peer_id).await;
-
-                            downloaders.entry(peer_id).and_modify(|downloader_is_free| {
-                                *downloader_is_free = true; // mark the downloader as free
-                            });
+                            if let Some(peer_score) = self.get_peer_score(peer_id).await {
+                                downloaders.set_peer_as_free_and_update_score(peer_id, peer_score);
+                            }
 
                             debug!("Downloader {peer_id} freed");
 
@@ -318,9 +371,7 @@ impl PeerHandler {
                         // reinsert the task to the queue if it was not completed
                         if downloaded_headers < previous_chunk_limit {
                             let new_start = startblock + headers.len() as u64;
-
                             let new_chunk_limit = previous_chunk_limit - headers.len() as u64;
-
                             debug!(
                                 "Task for ({startblock}, {new_chunk_limit}) was not completed, re-adding to the queue, {new_chunk_limit} remaining headers"
                             );
@@ -328,9 +379,9 @@ impl PeerHandler {
                             tasks_queue_not_started.push_back((new_start, new_chunk_limit));
                         }
 
-                        downloaders.entry(peer_id).and_modify(|downloader_is_free| {
-                            *downloader_is_free = true; // mark the downloader as free
-                        });
+                        if let Some(peer_score) = self.get_peer_score(peer_id).await {
+                            downloaders.set_peer_as_free_and_update_score(peer_id, peer_score);
+                        }
                         debug!("Downloader {peer_id} freed");
                     }
                     Err((peer_id, startblock, previous_chunk_limit, err)) => {
@@ -347,9 +398,9 @@ impl PeerHandler {
                         }
                         warn!("Failed to download chunk from peer {peer_id}");
 
-                        downloaders.entry(peer_id).and_modify(|downloader_is_free| {
-                            *downloader_is_free = true; // mark the downloader as free
-                        });
+                        if let Some(peer_score) = self.get_peer_score(peer_id).await {
+                            downloaders.set_peer_as_free_and_update_score(peer_id, peer_score);
+                        }
 
                         debug!("Downloader {peer_id} freed");
 
@@ -361,74 +412,16 @@ impl PeerHandler {
                 }
             }
 
-            let peer_channels = self
-                .get_all_peer_channels(&SUPPORTED_ETH_CAPABILITIES)
+            let peers_table = self
+                .peer_table
+                .get_peer_channels_with_score(&SUPPORTED_ETH_CAPABILITIES)
                 .await;
 
-            for (peer_id, _peer_channels) in &peer_channels {
-                if downloaders.contains_key(peer_id) {
-                    // Peer is already in the downloaders list, skip it
-                    continue;
-                }
+            // Update the downloaders with the most recent peers
+            downloaders.update_peers(peers_table);
 
-                downloaders.insert(*peer_id, true);
-
-                debug!("{peer_id} added as downloader");
-            }
-
-            // gather the free downloaders
-            // TODO: check if this is ordered
-            let free_downloaders = downloaders
-                .clone()
-                .into_iter()
-                .filter(|(_downloader_id, downloader_is_free)| *downloader_is_free)
-                .collect::<Vec<_>>();
-
-            if free_downloaders.is_empty() {
-                continue;
-            }
-
-            // Pick the first free downloader
-            // The free downloaders vector should be sorted by score.
-            let Some(free_peer_id) = free_downloaders.last().map(|(peer_id, _)| *peer_id) else {
-                debug!("(2) No free downloaders available, waiting for a peer to finish, retrying");
-                continue;
-            };
-
-            let channels = {
-                let max_score_peer_id = self.get_max_score_peer_id().await;
-                let chan = peer_channels.iter().find_map(|(peer_id, peer_channels)| {
-                    peer_id.eq(&free_peer_id).then_some(peer_channels.clone())
-                });
-
-                if max_score_peer_id.is_some()
-                    && (free_downloaders.contains(&(max_score_peer_id.unwrap(), true)))
-                {
-                    // TODO: remove these logs
-                    let max_score = self
-                        .get_peer_score(max_score_peer_id.unwrap())
-                        .await
-                        .unwrap();
-                    let free_peer_score = self.get_peer_score(free_peer_id).await.unwrap();
-                    assert!(
-                        max_score_peer_id.unwrap() == free_peer_id || max_score == free_peer_score,
-                        "left peer id: {}, left peer score: {}\nright peer id: {}, right peer score: {}",
-                        max_score_peer_id.unwrap(),
-                        max_score,
-                        free_peer_id,
-                        free_peer_score
-                    );
-                }
-
-                chan
-            };
-
-            let Some(mut free_downloader_channels) = channels else {
-                // The free downloader is not a peer of us anymore.
-                debug!(
-                    "Downloader {free_peer_id} is not a peer anymore, removing it from the downloaders list"
-                );
-                downloaders.shift_remove(&free_peer_id);
+            let Some((free_peer_id, mut channels)) = downloaders.get_best_scoring_available_peer()
+            else {
                 continue;
             };
 
@@ -449,12 +442,6 @@ impl PeerHandler {
 
             let tx = task_sender.clone();
 
-            downloaders
-                .entry(free_peer_id)
-                .and_modify(|downloader_is_free| {
-                    *downloader_is_free = false; // mark the downloader as busy
-                });
-
             debug!("Downloader {free_peer_id} is now busy");
 
             // run download_chunk_from_peer in a different Tokio task
@@ -465,7 +452,7 @@ impl PeerHandler {
 
                 let download_result = Self::download_chunk_from_peer(
                     free_peer_id,
-                    &mut free_downloader_channels,
+                    &mut channels,
                     startblock,
                     chunk_limit,
                 )
@@ -476,7 +463,7 @@ impl PeerHandler {
                         tx.send(Ok((
                             headers,
                             free_peer_id,
-                            free_downloader_channels,
+                            channels,
                             startblock,
                             chunk_limit,
                         )))
