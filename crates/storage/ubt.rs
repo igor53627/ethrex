@@ -4,7 +4,11 @@
 //! computing UBT roots for each canonical block.
 
 use ethereum_types::H256;
-use ubt::{B256, Blake3Hasher, TreeKey, UnifiedBinaryTree};
+use ethrex_common::types::AccountUpdate;
+use ubt::{
+    Address as UbtAddress, B256, BasicDataLeaf, Blake3Hasher, TreeKey, UnifiedBinaryTree,
+    chunkify_code, get_basic_data_key, get_code_chunk_key, get_code_hash_key, get_storage_slot_key,
+};
 
 /// Block number type alias for clarity.
 pub type BlockNumber = u64;
@@ -123,6 +127,101 @@ impl UbtState {
     }
 }
 
+/// Convert an Ethereum address to UBT address format.
+fn to_ubt_address(addr: &ethrex_common::Address) -> UbtAddress {
+    UbtAddress::from_slice(addr.as_bytes())
+}
+
+/// Convert account updates to UBT updates.
+///
+/// This function extracts all state changes from `AccountUpdate`s and converts
+/// them to the UBT key-value format per EIP-7864.
+pub fn account_updates_to_ubt(updates: &[AccountUpdate]) -> Vec<UbtUpdate> {
+    let mut ubt_updates = Vec::with_capacity(updates.len() * 3);
+
+    for update in updates {
+        let ubt_addr = to_ubt_address(&update.address);
+
+        if update.removed {
+            let basic_key = get_basic_data_key(&ubt_addr);
+            ubt_updates.push(UbtUpdate {
+                key: basic_key,
+                value: Some(B256::ZERO),
+            });
+
+            let code_hash_key = get_code_hash_key(&ubt_addr);
+            ubt_updates.push(UbtUpdate {
+                key: code_hash_key,
+                value: Some(B256::ZERO),
+            });
+            continue;
+        }
+
+        if let Some(info) = &update.info {
+            let code_size = update
+                .code
+                .as_ref()
+                .map(|c| c.bytecode.len() as u32)
+                .unwrap_or(0);
+
+            let balance_u128 = if info.balance > ethereum_types::U256::from(u128::MAX) {
+                u128::MAX
+            } else {
+                info.balance.low_u128()
+            };
+
+            let basic_data = BasicDataLeaf::new(info.nonce, balance_u128, code_size);
+            let basic_key = get_basic_data_key(&ubt_addr);
+            ubt_updates.push(UbtUpdate {
+                key: basic_key,
+                value: Some(basic_data.encode()),
+            });
+
+            let code_hash_key = get_code_hash_key(&ubt_addr);
+            ubt_updates.push(UbtUpdate {
+                key: code_hash_key,
+                value: Some(B256::from_slice(info.code_hash.as_bytes())),
+            });
+        }
+
+        if let Some(code) = &update.code {
+            let chunks = chunkify_code(&code.bytecode);
+            for (i, chunk) in chunks.iter().enumerate() {
+                let chunk_key = get_code_chunk_key(&ubt_addr, i as u64);
+                ubt_updates.push(UbtUpdate {
+                    key: chunk_key,
+                    value: Some(chunk.encode()),
+                });
+            }
+        }
+
+        for (slot, value) in &update.added_storage {
+            let slot_bytes: [u8; 32] = slot.0;
+            let storage_key = get_storage_slot_key(&ubt_addr, &slot_bytes);
+
+            let value_b256 = if value.is_zero() {
+                B256::ZERO
+            } else {
+                let bytes: [u8; 32] = {
+                    let mut buf = [0u8; 32];
+                    for (i, limb) in value.0.iter().enumerate() {
+                        buf[24 - i * 8..32 - i * 8].copy_from_slice(&limb.to_be_bytes());
+                    }
+                    buf
+                };
+                B256::from(bytes)
+            };
+
+            ubt_updates.push(UbtUpdate {
+                key: storage_key,
+                value: Some(value_b256),
+            });
+        }
+    }
+
+    ubt_updates
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +290,55 @@ mod tests {
         assert_eq!(state.root(), H256::zero());
         assert_eq!(state.current_head(), None);
         assert!(state.is_rebuilding());
+    }
+
+    #[test]
+    fn test_account_updates_to_ubt() {
+        use ethrex_common::types::{AccountInfo, Code};
+
+        let addr = ethrex_common::Address::repeat_byte(0x42);
+        let update = AccountUpdate {
+            address: addr,
+            removed: false,
+            info: Some(AccountInfo {
+                nonce: 5,
+                balance: ethereum_types::U256::from(1000u64),
+                code_hash: H256::repeat_byte(0xab),
+            }),
+            code: None,
+            added_storage: Default::default(),
+            removed_storage: false,
+        };
+
+        let ubt_updates = account_updates_to_ubt(&[update]);
+
+        assert_eq!(ubt_updates.len(), 2);
+    }
+
+    #[test]
+    fn test_account_updates_to_ubt_with_storage() {
+        use ethrex_common::types::AccountInfo;
+
+        let addr = ethrex_common::Address::repeat_byte(0x42);
+        let mut storage = rustc_hash::FxHashMap::default();
+        storage.insert(H256::repeat_byte(0x01), ethereum_types::U256::from(100u64));
+        storage.insert(H256::repeat_byte(0x02), ethereum_types::U256::from(200u64));
+
+        let update = AccountUpdate {
+            address: addr,
+            removed: false,
+            info: Some(AccountInfo {
+                nonce: 1,
+                balance: ethereum_types::U256::from(500u64),
+                code_hash: H256::zero(),
+            }),
+            code: None,
+            added_storage: storage,
+            removed_storage: false,
+        };
+
+        let ubt_updates = account_updates_to_ubt(&[update]);
+
+        assert_eq!(ubt_updates.len(), 4);
     }
 }
