@@ -100,13 +100,25 @@ impl UbtState {
         _block_hash: H256,
         updates: &[UbtUpdate],
     ) -> H256 {
-        let entries: Vec<(TreeKey, B256)> = updates
-            .iter()
-            .filter_map(|u| u.value.map(|v| (u.key, v)))
-            .collect();
+        // Separate insertions from deletions
+        let mut insertions: Vec<(TreeKey, B256)> = Vec::new();
+        let mut deletions: Vec<TreeKey> = Vec::new();
 
-        if !entries.is_empty() {
-            self.tree.insert_batch(entries);
+        for update in updates {
+            match update.value {
+                Some(value) => insertions.push((update.key, value)),
+                None => deletions.push(update.key),
+            }
+        }
+
+        // Apply deletions first
+        for key in deletions {
+            self.tree.delete(&key);
+        }
+
+        // Then apply insertions
+        if !insertions.is_empty() {
+            self.tree.insert_batch(insertions);
         }
 
         self.current_head = Some(block_number);
@@ -218,18 +230,7 @@ where
             let slot_bytes: [u8; 32] = slot.0;
             let storage_key = get_storage_slot_key(&ubt_addr, &slot_bytes);
 
-            let value_b256 = if value.is_zero() {
-                B256::ZERO
-            } else {
-                let bytes: [u8; 32] = {
-                    let mut buf = [0u8; 32];
-                    for (i, limb) in value.0.iter().enumerate() {
-                        buf[24 - i * 8..32 - i * 8].copy_from_slice(&limb.to_be_bytes());
-                    }
-                    buf
-                };
-                B256::from(bytes)
-            };
+            let value_b256 = B256::from(value.to_big_endian());
 
             ubt_updates.push(UbtUpdate {
                 key: storage_key,
