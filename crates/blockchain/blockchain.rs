@@ -1031,6 +1031,8 @@ impl Blockchain {
         account_updates: &[AccountUpdate],
     ) {
         // Create a code size lookup function using the storage
+        // TODO: Distinguish between "code doesn't exist" vs "code lookup failed" to avoid
+        // silently producing incorrect UBT roots on storage errors.
         let storage = &self.storage;
         let code_size_lookup = |code_hash: &H256| -> Option<u32> {
             storage
