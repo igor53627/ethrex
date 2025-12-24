@@ -31,6 +31,8 @@ use ethrex_metrics::metrics;
 use ethrex_rlp::constants::RLP_NULL;
 use ethrex_rlp::decode::RLPDecode;
 use ethrex_rlp::encode::RLPEncode;
+#[cfg(feature = "ubt")]
+use ethrex_storage::account_updates_to_ubt;
 use ethrex_storage::{
     AccountUpdatesList, Store, UpdateBatch, error::StoreError, hash_address, hash_key,
 };
@@ -1018,6 +1020,39 @@ impl Blockchain {
         })
     }
 
+    /// Apply UBT (EIP-7864) updates for a block.
+    ///
+    /// This updates the parallel UBT state commitment after a block is accepted.
+    #[cfg(feature = "ubt")]
+    fn apply_ubt_updates(
+        &self,
+        block_number: BlockNumber,
+        block_hash: H256,
+        account_updates: &[AccountUpdate],
+    ) {
+        let ubt_updates = account_updates_to_ubt(account_updates);
+        if ubt_updates.is_empty() {
+            return;
+        }
+
+        let ubt_state = self.storage.ubt_state();
+        match ubt_state.lock() {
+            Ok(mut state) => {
+                let root = state.apply_block_updates(block_number, block_hash, &ubt_updates);
+                info!(
+                    block = block_number,
+                    ubt_root = %root,
+                    entries = ubt_updates.len(),
+                    stems = state.stem_count(),
+                    "UBT state updated"
+                );
+            }
+            Err(e) => {
+                debug!("Failed to lock UBT state: {}", e);
+            }
+        }
+    }
+
     #[instrument(
         level = "trace",
         name = "Block DB update",
@@ -1065,8 +1100,14 @@ impl Blockchain {
         );
 
         let merkleized = Instant::now();
+        let block_hash = block.hash();
         let result = self.store_block(block, account_updates_list, res);
         let stored = Instant::now();
+
+        #[cfg(feature = "ubt")]
+        if result.is_ok() {
+            self.apply_ubt_updates(block_number, block_hash, &updates);
+        }
 
         if self.options.perf_logs_enabled {
             Self::print_add_block_logs(
