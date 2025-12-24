@@ -145,6 +145,10 @@ pub struct Store {
     /// those changes already affect the code hash stored in the account, and only
     /// may result in this cache having useless data.
     account_code_cache: Arc<CodeCache>,
+
+    /// UBT (EIP-7864) state tracking for parallel state commitment.
+    #[cfg(feature = "ubt")]
+    ubt_state: Arc<Mutex<crate::ubt::UbtState>>,
 }
 
 pub type StorageTrieNodes = Vec<(H256, Vec<(Nibbles, Vec<u8>)>)>;
@@ -1283,6 +1287,8 @@ impl Store {
             trie_update_worker_tx: trie_upd_tx,
             last_computed_flatkeyvalue: Arc::new(Mutex::new(last_written)),
             account_code_cache: Arc::new(CodeCache::default()),
+            #[cfg(feature = "ubt")]
+            ubt_state: Arc::new(Mutex::new(crate::ubt::UbtState::new())),
         };
         let backend_clone = store.backend.clone();
         let last_computed_fkv = store.last_computed_flatkeyvalue.clone();
@@ -1348,6 +1354,12 @@ impl Store {
             }
         });
         Ok(store)
+    }
+
+    /// Get a reference to the UBT state for EIP-7864 tracking.
+    #[cfg(feature = "ubt")]
+    pub fn ubt_state(&self) -> Arc<Mutex<crate::ubt::UbtState>> {
+        Arc::clone(&self.ubt_state)
     }
 
     pub async fn new_from_genesis(
