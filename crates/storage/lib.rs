@@ -6,6 +6,8 @@ mod layering;
 pub mod rlp;
 pub mod store;
 pub mod trie;
+#[cfg(feature = "ubt")]
+pub mod ubt;
 pub mod utils;
 
 pub use layering::apply_prefix;
