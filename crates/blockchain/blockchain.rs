@@ -1030,7 +1030,17 @@ impl Blockchain {
         block_hash: H256,
         account_updates: &[AccountUpdate],
     ) {
-        let ubt_updates = account_updates_to_ubt(account_updates);
+        // Create a code size lookup function using the storage
+        let storage = &self.storage;
+        let code_size_lookup = |code_hash: &H256| -> Option<u32> {
+            storage
+                .get_account_code(*code_hash)
+                .ok()
+                .flatten()
+                .map(|code| code.bytecode.len() as u32)
+        };
+
+        let ubt_updates = account_updates_to_ubt(account_updates, Some(code_size_lookup));
         if ubt_updates.is_empty() {
             return;
         }

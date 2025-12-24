@@ -136,7 +136,19 @@ fn to_ubt_address(addr: &ethrex_common::Address) -> UbtAddress {
 ///
 /// This function extracts all state changes from `AccountUpdate`s and converts
 /// them to the UBT key-value format per EIP-7864.
-pub fn account_updates_to_ubt(updates: &[AccountUpdate]) -> Vec<UbtUpdate> {
+///
+/// # Arguments
+/// * `updates` - The account updates from block execution
+/// * `code_size_lookup` - Optional function to look up code size for accounts
+///   where code is not present in the update but code_hash is non-empty.
+///   If None, code_size will be 0 for such accounts.
+pub fn account_updates_to_ubt<F>(
+    updates: &[AccountUpdate],
+    code_size_lookup: Option<F>,
+) -> Vec<UbtUpdate>
+where
+    F: Fn(&ethereum_types::H256) -> Option<u32>,
+{
     let mut ubt_updates = Vec::with_capacity(updates.len() * 3);
 
     for update in updates {
@@ -158,11 +170,18 @@ pub fn account_updates_to_ubt(updates: &[AccountUpdate]) -> Vec<UbtUpdate> {
         }
 
         if let Some(info) = &update.info {
-            let code_size = update
-                .code
-                .as_ref()
-                .map(|c| c.bytecode.len() as u32)
-                .unwrap_or(0);
+            // Derive code_size: prefer from update.code, fallback to lookup
+            let code_size = if let Some(code) = &update.code {
+                code.bytecode.len() as u32
+            } else if info.code_hash != H256::zero() {
+                // Account has code but it's not in this update - look it up
+                code_size_lookup
+                    .as_ref()
+                    .and_then(|lookup| lookup(&info.code_hash))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             let balance_u128 = if info.balance > ethereum_types::U256::from(u128::MAX) {
                 u128::MAX
@@ -310,7 +329,7 @@ mod tests {
             removed_storage: false,
         };
 
-        let ubt_updates = account_updates_to_ubt(&[update]);
+        let ubt_updates = account_updates_to_ubt::<fn(&H256) -> Option<u32>>(&[update], None);
 
         assert_eq!(ubt_updates.len(), 2);
     }
@@ -337,7 +356,7 @@ mod tests {
             removed_storage: false,
         };
 
-        let ubt_updates = account_updates_to_ubt(&[update]);
+        let ubt_updates = account_updates_to_ubt::<fn(&H256) -> Option<u32>>(&[update], None);
 
         assert_eq!(ubt_updates.len(), 4);
     }
