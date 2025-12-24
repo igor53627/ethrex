@@ -13777,9 +13777,9 @@ checksum = "f8c1ae7cc0fdb8b842d65d127cb981574b0d2b249b74d1c7a2986863dc134f71"
 
 [[package]]
 name = "ubt"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f30a252ed97c9146099f05cbb64da4e60b85831b339402c7c3634df8b8074031"
+checksum = "ddf2730b675af913a5f0742e3dd6e740b27dc6267c7cf8ffb02981f86883899a"
 dependencies = [
  "alloy-primitives",
  "blake3",
