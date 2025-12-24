@@ -1837,6 +1837,10 @@ impl Store {
         safe: Option<BlockNumber>,
         finalized: Option<BlockNumber>,
     ) -> Result<(), StoreError> {
+        // Detect reorg for UBT: if new_canonical_blocks is non-empty, we're reorganizing
+        #[cfg(feature = "ubt")]
+        let is_reorg = !new_canonical_blocks.is_empty();
+
         // Updates first the latest_block_header to avoid nonce inconsistencies #3927.
         let new_head = self
             .load_block_header_by_hash(head_hash)?
@@ -1850,6 +1854,18 @@ impl Store {
             finalized,
         )
         .await?;
+
+        // Reset UBT on reorg - MVP strategy: rebuild from scratch
+        #[cfg(feature = "ubt")]
+        if is_reorg {
+            if let Ok(mut state) = self.ubt_state.lock() {
+                tracing::warn!(
+                    head = head_number,
+                    "UBT reorg detected, resetting state (rebuild not yet implemented)"
+                );
+                state.reset();
+            }
+        }
 
         Ok(())
     }
