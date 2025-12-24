@@ -7,7 +7,7 @@ mod smoke_test;
 pub mod tracing;
 pub mod vm;
 
-use ::tracing::{debug, info, instrument, trace};
+use ::tracing::{debug, info, instrument, trace, warn};
 use constants::{MAX_INITCODE_SIZE, MAX_TRANSACTION_DATA_SIZE, POST_OSAKA_GAS_LIMIT_CAP};
 use error::MempoolError;
 use error::{ChainError, InvalidBlockError};
@@ -1046,19 +1046,23 @@ impl Blockchain {
         }
 
         let ubt_state = self.storage.ubt_state();
+        let entries_count = ubt_updates.len();
         match ubt_state.lock() {
             Ok(mut state) => {
                 let root = state.apply_block_updates(block_number, block_hash, &ubt_updates);
+                let stems = state.stem_count();
+                drop(state); // Release lock before logging
+
                 info!(
                     block = block_number,
                     ubt_root = %root,
-                    entries = ubt_updates.len(),
-                    stems = state.stem_count(),
+                    entries = entries_count,
+                    stems,
                     "UBT state updated"
                 );
             }
             Err(e) => {
-                debug!("Failed to lock UBT state: {}", e);
+                warn!("Failed to lock UBT state: {}", e);
             }
         }
     }

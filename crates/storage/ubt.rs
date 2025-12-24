@@ -5,6 +5,7 @@
 
 use ethereum_types::H256;
 use ethrex_common::types::AccountUpdate;
+use tracing::warn;
 use ubt::{
     Address as UbtAddress, B256, BasicDataLeaf, Blake3Hasher, TreeKey, UnifiedBinaryTree,
     chunkify_code, get_basic_data_key, get_code_chunk_key, get_code_hash_key, get_storage_slot_key,
@@ -170,13 +171,13 @@ where
             let basic_key = get_basic_data_key(&ubt_addr);
             ubt_updates.push(UbtUpdate {
                 key: basic_key,
-                value: Some(B256::ZERO),
+                value: None, // Deletion per EIP-7864
             });
 
             let code_hash_key = get_code_hash_key(&ubt_addr);
             ubt_updates.push(UbtUpdate {
                 key: code_hash_key,
-                value: Some(B256::ZERO),
+                value: None, // Deletion per EIP-7864
             });
             continue;
         }
@@ -196,6 +197,11 @@ where
             };
 
             let balance_u128 = if info.balance > ethereum_types::U256::from(u128::MAX) {
+                warn!(
+                    address = ?update.address,
+                    balance = %info.balance,
+                    "Balance exceeds u128::MAX, capping at u128::MAX"
+                );
                 u128::MAX
             } else {
                 info.balance.low_u128()
