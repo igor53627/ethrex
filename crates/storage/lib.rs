@@ -6,6 +6,10 @@ mod layering;
 pub mod rlp;
 pub mod store;
 pub mod trie;
+#[cfg(feature = "ubt")]
+pub mod ubt;
+#[cfg(feature = "ubt")]
+pub use ubt::{UbtState, UbtUpdate, account_updates_to_ubt};
 pub mod utils;
 
 pub use layering::apply_prefix;

@@ -7,7 +7,7 @@ mod smoke_test;
 pub mod tracing;
 pub mod vm;
 
-use ::tracing::{debug, info, instrument, trace};
+use ::tracing::{debug, info, instrument, trace, warn};
 use constants::{MAX_INITCODE_SIZE, MAX_TRANSACTION_DATA_SIZE, POST_OSAKA_GAS_LIMIT_CAP};
 use error::MempoolError;
 use error::{ChainError, InvalidBlockError};
@@ -31,6 +31,8 @@ use ethrex_metrics::metrics;
 use ethrex_rlp::constants::RLP_NULL;
 use ethrex_rlp::decode::RLPDecode;
 use ethrex_rlp::encode::RLPEncode;
+#[cfg(feature = "ubt")]
+use ethrex_storage::account_updates_to_ubt;
 use ethrex_storage::{
     AccountUpdatesList, Store, UpdateBatch, error::StoreError, hash_address, hash_key,
 };
@@ -118,6 +120,16 @@ struct PartialMerkleizationResults {
     code_updates: FxHashMap<H256, Code>,
 }
 
+/// Result from merkleization that includes both the MPT updates and raw account updates for UBT.
+#[cfg(feature = "ubt")]
+pub struct MerkleizationResult {
+    pub account_updates_list: AccountUpdatesList,
+    pub raw_account_updates: Vec<AccountUpdate>,
+}
+
+#[cfg(not(feature = "ubt"))]
+pub type MerkleizationResult = AccountUpdatesList;
+
 #[derive(Debug, Clone)]
 pub struct BatchBlockProcessingFailure {
     pub last_valid_hash: H256,
@@ -203,7 +215,7 @@ impl Blockchain {
     ) -> Result<
         (
             BlockExecutionResult,
-            AccountUpdatesList,
+            MerkleizationResult,
             // FIXME: extract to stats struct
             usize,
             [Instant; 6],
@@ -335,7 +347,7 @@ impl Blockchain {
         parent_header: &'b BlockHeader,
         queue_length: &AtomicUsize,
         max_queue_length: &mut usize,
-    ) -> Result<AccountUpdatesList, StoreError>
+    ) -> Result<MerkleizationResult, StoreError>
     where
         'a: 's,
         'b: 's,
@@ -386,9 +398,13 @@ impl Blockchain {
         let mut storage_updates_map: StoreUpdatesMap = Default::default();
         let mut code_updates: FxHashMap<H256, Code> = Default::default();
         let mut hashed_address_cache: FxHashMap<H160, H256> = Default::default();
+        #[cfg(feature = "ubt")]
+        let mut raw_account_updates: Vec<AccountUpdate> = Vec::new();
         for updates in rx {
             let current_length = queue_length.fetch_sub(1, Ordering::Acquire);
             *max_queue_length = current_length.max(*max_queue_length);
+            #[cfg(feature = "ubt")]
+            raw_account_updates.extend(updates.iter().cloned());
             let mut hashed_updates: Vec<_> = updates
                 .into_iter()
                 .map(|u| {
@@ -463,12 +479,21 @@ impl Blockchain {
             .collect();
         let code_updates = code_updates.into_iter().collect();
 
-        Ok(AccountUpdatesList {
+        let account_updates_list = AccountUpdatesList {
             state_trie_hash,
             state_updates,
             storage_updates,
             code_updates,
-        })
+        };
+
+        #[cfg(feature = "ubt")]
+        return Ok(MerkleizationResult {
+            account_updates_list,
+            raw_account_updates,
+        });
+
+        #[cfg(not(feature = "ubt"))]
+        Ok(account_updates_list)
     }
 
     fn handle_merkleization_sequential(
@@ -477,7 +502,7 @@ impl Blockchain {
         parent_header: &BlockHeader,
         queue_length: &AtomicUsize,
         max_queue_length: &mut usize,
-    ) -> Result<AccountUpdatesList, StoreError> {
+    ) -> Result<MerkleizationResult, StoreError> {
         let mut state_trie = self
             .storage
             .state_trie(parent_header.hash())?
@@ -489,10 +514,14 @@ impl Blockchain {
         let mut account_states: FxHashMap<H256, AccountState> = Default::default();
 
         let mut hashed_address_cache: FxHashMap<H160, H256> = Default::default();
+        #[cfg(feature = "ubt")]
+        let mut raw_account_updates: Vec<AccountUpdate> = Vec::new();
 
         for updates in rx {
             let current_length = queue_length.fetch_sub(1, Ordering::Acquire);
             *max_queue_length = current_length.max(*max_queue_length);
+            #[cfg(feature = "ubt")]
+            raw_account_updates.extend(updates.iter().cloned());
             let hashed_updates: Vec<_> = updates
                 .into_iter()
                 .map(|u| {
@@ -520,12 +549,21 @@ impl Blockchain {
             .collect();
         let code_updates = code_updates.into_iter().collect();
 
-        Ok(AccountUpdatesList {
+        let account_updates_list = AccountUpdatesList {
             state_trie_hash,
             state_updates,
             storage_updates,
             code_updates,
-        })
+        };
+
+        #[cfg(feature = "ubt")]
+        return Ok(MerkleizationResult {
+            account_updates_list,
+            raw_account_updates,
+        });
+
+        #[cfg(not(feature = "ubt"))]
+        Ok(account_updates_list)
     }
 
     /// Processes a batch of account updates, applying them to the state trie and storage tries,
@@ -1018,6 +1056,55 @@ impl Blockchain {
         })
     }
 
+    /// Apply UBT (EIP-7864) updates for a block.
+    ///
+    /// This updates the parallel UBT state commitment after a block is accepted.
+    #[cfg(feature = "ubt")]
+    fn apply_ubt_updates(
+        &self,
+        block_number: BlockNumber,
+        block_hash: H256,
+        account_updates: &[AccountUpdate],
+    ) {
+        // Create a code size lookup function using the storage
+        // TODO: Distinguish between "code doesn't exist" vs "code lookup failed" to avoid
+        // silently producing incorrect UBT roots on storage errors.
+        let storage = &self.storage;
+        let code_size_lookup = |code_hash: &H256| -> Option<u32> {
+            storage
+                .get_account_code(*code_hash)
+                .ok()
+                .flatten()
+                .map(|code| code.bytecode.len() as u32)
+        };
+
+        let ubt_updates = account_updates_to_ubt(account_updates, Some(code_size_lookup));
+        if ubt_updates.is_empty() {
+            return;
+        }
+
+        let ubt_state = self.storage.ubt_state();
+        let entries_count = ubt_updates.len();
+        match ubt_state.lock() {
+            Ok(mut state) => {
+                let root = state.apply_block_updates(block_number, block_hash, &ubt_updates);
+                let stems = state.stem_count();
+                drop(state); // Release lock before logging
+
+                info!(
+                    block = block_number,
+                    ubt_root = %root,
+                    entries = entries_count,
+                    stems,
+                    "UBT state updated"
+                );
+            }
+            Err(e) => {
+                warn!("Failed to lock UBT state: {}", e);
+            }
+        }
+    }
+
     #[instrument(
         level = "trace",
         name = "Block DB update",
@@ -1065,8 +1152,15 @@ impl Blockchain {
         );
 
         let merkleized = Instant::now();
+        #[cfg(feature = "ubt")]
+        let block_hash = block.hash();
         let result = self.store_block(block, account_updates_list, res);
         let stored = Instant::now();
+
+        #[cfg(feature = "ubt")]
+        if result.is_ok() {
+            self.apply_ubt_updates(block_number, block_hash, &updates);
+        }
 
         if self.options.perf_logs_enabled {
             Self::print_add_block_logs(
@@ -1094,7 +1188,7 @@ impl Blockchain {
         let vm_db = StoreVmDatabase::new(self.storage.clone(), parent_header.clone())?;
         let vm = self.new_evm(vm_db)?;
 
-        let (res, account_updates_list, merkle_queue_length, instants) =
+        let (res, merkleization_result, merkle_queue_length, instants) =
             self.execute_block_pipeline(&block, &parent_header, vm)?;
 
         let (gas_used, gas_limit, block_number, transactions_count) = (
@@ -1104,8 +1198,23 @@ impl Blockchain {
             block.body.transactions.len(),
         );
 
+        #[cfg(feature = "ubt")]
+        let (account_updates_list, raw_account_updates) = (
+            merkleization_result.account_updates_list,
+            merkleization_result.raw_account_updates,
+        );
+        #[cfg(not(feature = "ubt"))]
+        let account_updates_list = merkleization_result;
+
+        #[cfg(feature = "ubt")]
+        let block_hash = block.hash();
         let result = self.store_block(block, account_updates_list, res);
         let stored = Instant::now();
+
+        #[cfg(feature = "ubt")]
+        if result.is_ok() {
+            self.apply_ubt_updates(block_number, block_hash, &raw_account_updates);
+        }
 
         let instants = std::array::from_fn(move |i| {
             if i < instants.len() {
