@@ -479,11 +479,24 @@ impl Blockchain {
             .collect();
         let code_updates = code_updates.into_iter().collect();
 
+        #[cfg(feature = "ubt")]
+        let plain_storage_updates: Vec<_> = raw_account_updates
+            .iter()
+            .flat_map(|u| {
+                u.added_storage
+                    .iter()
+                    .map(move |(slot, value)| (u.address, *slot, *value))
+            })
+            .collect();
+        #[cfg(not(feature = "ubt"))]
+        let plain_storage_updates = Vec::new();
+
         let account_updates_list = AccountUpdatesList {
             state_trie_hash,
             state_updates,
             storage_updates,
             code_updates,
+            plain_storage_updates,
         };
 
         #[cfg(feature = "ubt")]
@@ -549,11 +562,24 @@ impl Blockchain {
             .collect();
         let code_updates = code_updates.into_iter().collect();
 
+        #[cfg(feature = "ubt")]
+        let plain_storage_updates: Vec<_> = raw_account_updates
+            .iter()
+            .flat_map(|u| {
+                u.added_storage
+                    .iter()
+                    .map(move |(slot, value)| (u.address, *slot, *value))
+            })
+            .collect();
+        #[cfg(not(feature = "ubt"))]
+        let plain_storage_updates = Vec::new();
+
         let account_updates_list = AccountUpdatesList {
             state_trie_hash,
             state_updates,
             storage_updates,
             code_updates,
+            plain_storage_updates,
         };
 
         #[cfg(feature = "ubt")]
@@ -1126,6 +1152,7 @@ impl Blockchain {
             receipts: vec![(block.hash(), execution_result.receipts)],
             blocks: vec![block],
             code_updates: account_updates_list.code_updates,
+            plain_storage_updates: account_updates_list.plain_storage_updates,
         };
 
         self.storage
@@ -1465,6 +1492,7 @@ impl Blockchain {
             blocks,
             receipts: all_receipts,
             code_updates,
+            plain_storage_updates: account_updates_list.plain_storage_updates,
         };
 
         self.storage

@@ -87,7 +87,13 @@ pub const STORAGE_FLATKEYVALUE: &str = "storage_flatkeyvalue";
 
 pub const MISC_VALUES: &str = "misc_values";
 
-pub const TABLES: [&str; 17] = [
+/// Plain storage table for PIR export: [Address:20][Slot:32] => [Value:32]
+/// Stores storage slots with original (unhashed) keys for efficient iteration.
+/// Key format: address (20 bytes) || slot (32 bytes) = 52 bytes
+/// Value format: U256 encoded as big-endian 32 bytes
+pub const PLAIN_STORAGE: &str = "plain_storage";
+
+pub const TABLES: [&str; 18] = [
     CHAIN_DATA,
     ACCOUNT_CODES,
     BODIES,
@@ -105,4 +111,5 @@ pub const TABLES: [&str; 17] = [
     ACCOUNT_FLATKEYVALUE,
     STORAGE_FLATKEYVALUE,
     MISC_VALUES,
+    PLAIN_STORAGE,
 ];
