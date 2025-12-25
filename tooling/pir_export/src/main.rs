@@ -3,7 +3,7 @@ use ethrex_storage::{EngineType, Store};
 use eyre::Result;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod exporter;
@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
         info!("Exported {} storage entries", count);
     } else {
         info!("Using plain keys mode (84-byte records)");
-        let count = exporter::export_plain(&store, state_root, &mut writer).await?;
+        info!("Note: Plain mode exports current state, not historical state at block {}", block_number);
+        let count = exporter::export_plain(&store, &mut writer)?;
         info!("Exported {} storage entries", count);
     }
 

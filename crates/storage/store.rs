@@ -7,8 +7,8 @@ use crate::{
         tables::{
             ACCOUNT_CODES, ACCOUNT_FLATKEYVALUE, ACCOUNT_TRIE_NODES, BLOCK_NUMBERS, BODIES,
             CANONICAL_BLOCK_HASHES, CHAIN_DATA, FULLSYNC_HEADERS, HEADERS, INVALID_CHAINS,
-            MISC_VALUES, PENDING_BLOCKS, PLAIN_STORAGE, RECEIPTS, SNAP_STATE,
-            STORAGE_FLATKEYVALUE, STORAGE_TRIE_NODES, TRANSACTION_LOCATIONS,
+            MISC_VALUES, PENDING_BLOCKS, PLAIN_STORAGE, RECEIPTS, SNAP_STATE, STORAGE_FLATKEYVALUE,
+            STORAGE_TRIE_NODES, TRANSACTION_LOCATIONS,
         },
     },
     apply_prefix,
@@ -174,6 +174,9 @@ pub struct UpdateBatch {
     /// Plain storage updates for PIR export: (address, slot, value)
     /// Stores original unhashed keys for efficient iteration
     pub plain_storage_updates: Vec<(Address, H256, U256)>,
+    /// Addresses whose storage should be completely removed from PLAIN_STORAGE
+    /// This happens when an account is destroyed (e.g., via SELFDESTRUCT)
+    pub plain_storage_removed_accounts: Vec<Address>,
 }
 
 pub type StorageUpdates = Vec<(H256, Vec<(Nibbles, Vec<u8>)>)>;
@@ -185,6 +188,8 @@ pub struct AccountUpdatesList {
     pub code_updates: Vec<(H256, Code)>,
     /// Plain storage updates for PIR export: (address, slot, value)
     pub plain_storage_updates: Vec<(Address, H256, U256)>,
+    /// Addresses whose storage should be completely removed from PLAIN_STORAGE
+    pub plain_storage_removed_accounts: Vec<Address>,
 }
 
 impl Store {
@@ -1229,6 +1234,20 @@ impl Store {
             tx.put(ACCOUNT_CODES, code_hash.as_ref(), &buf)?;
         }
 
+        for address in update_batch.plain_storage_removed_accounts {
+            let prefix = address.as_bytes();
+            let read_tx = self.backend.begin_read()?;
+            let iter = read_tx.prefix_iterator(PLAIN_STORAGE, prefix)?;
+            for res in iter {
+                let (key, _) = res?;
+                if key.starts_with(prefix) {
+                    tx.delete(PLAIN_STORAGE, &key)?;
+                } else {
+                    break;
+                }
+            }
+        }
+
         for (address, slot, value) in update_batch.plain_storage_updates {
             let mut key = [0u8; 52];
             key[0..20].copy_from_slice(address.as_bytes());
@@ -1520,12 +1539,17 @@ impl Store {
         let mut ret_storage_updates = Vec::new();
         let mut code_updates = Vec::new();
         let mut plain_storage_updates = Vec::new();
+        let mut plain_storage_removed_accounts = Vec::new();
         let state_root = state_trie.hash_no_commit();
         for update in account_updates {
             let hashed_address = hash_address(&update.address);
             if update.removed {
                 state_trie.remove(&hashed_address)?;
+                plain_storage_removed_accounts.push(update.address);
                 continue;
+            }
+            if update.removed_storage {
+                plain_storage_removed_accounts.push(update.address);
             }
             let mut account_state = match state_trie.get(&hashed_address)? {
                 Some(encoded_state) => AccountState::decode(&encoded_state)?,
@@ -1572,6 +1596,7 @@ impl Store {
             storage_updates: ret_storage_updates,
             code_updates,
             plain_storage_updates,
+            plain_storage_removed_accounts,
         })
     }
 
@@ -1586,6 +1611,7 @@ impl Store {
         let mut ret_storage_updates = Vec::new();
         let mut code_updates = Vec::new();
         let mut plain_storage_updates = Vec::new();
+        let mut plain_storage_removed_accounts = Vec::new();
         let state_root = state_trie.hash_no_commit();
 
         for update in account_updates.iter() {
@@ -1593,6 +1619,7 @@ impl Store {
 
             if update.removed {
                 state_trie.remove(&hashed_address)?;
+                plain_storage_removed_accounts.push(update.address);
                 continue;
             }
 
@@ -1603,6 +1630,7 @@ impl Store {
 
             if update.removed_storage {
                 account_state.storage_root = *EMPTY_TRIE_HASH;
+                plain_storage_removed_accounts.push(update.address);
             }
 
             if let Some(info) = &update.info {
@@ -1654,6 +1682,7 @@ impl Store {
             storage_updates: ret_storage_updates,
             code_updates,
             plain_storage_updates,
+            plain_storage_removed_accounts,
         };
 
         Ok((storage_tries, account_updates_list))
@@ -2060,30 +2089,41 @@ impl Store {
         self.iter_storage_from(state_root, hashed_address, H256::zero())
     }
 
-    /// Returns an iterator over all storage slots in the PLAIN_STORAGE table.
-    /// Each item is (address, slot, value) with original unhashed keys.
-    /// Note: This iterates over the current state, not a historical snapshot.
-    pub async fn iter_plain_storage(
-        &self,
-        _state_root: H256,
-    ) -> Result<impl Iterator<Item = (Address, H256, U256)> + '_, StoreError> {
+    /// Iterates over all storage slots in the PLAIN_STORAGE table, calling the
+    /// provided callback for each entry.
+    ///
+    /// This is a streaming API that processes entries one at a time without
+    /// loading the entire dataset into memory.
+    ///
+    /// Note: This iterates over the **current** state as stored in PLAIN_STORAGE,
+    /// not a historical snapshot at a specific state_root. The PLAIN_STORAGE table
+    /// reflects the latest committed state.
+    ///
+    /// Returns the number of entries processed, or an error if the callback
+    /// returns an error.
+    pub fn iter_plain_storage<F, E>(&self, mut callback: F) -> Result<u64, StoreError>
+    where
+        F: FnMut(Address, H256, U256) -> Result<(), E>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         let tx = self.backend.begin_read()?;
         let iter = tx.prefix_iterator(PLAIN_STORAGE, &[])?;
 
-        let result: Vec<(Address, H256, U256)> = iter
-            .filter_map(|res| {
-                let (key, value) = res.ok()?;
-                if key.len() != 52 || value.len() != 32 {
-                    return None;
-                }
-                let address = Address::from_slice(&key[0..20]);
-                let slot = H256::from_slice(&key[20..52]);
-                let val = U256::from_big_endian(&value);
-                Some((address, slot, val))
-            })
-            .collect();
+        let mut count = 0u64;
+        for res in iter {
+            let (key, value) = res?;
+            if key.len() != 52 || value.len() != 32 {
+                continue;
+            }
+            let address = Address::from_slice(&key[0..20]);
+            let slot = H256::from_slice(&key[20..52]);
+            let val = U256::from_big_endian(&value);
 
-        Ok(result.into_iter())
+            callback(address, slot, val).map_err(|e| StoreError::Custom(e.to_string()))?;
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     pub fn get_account_range_proof(

@@ -4,6 +4,8 @@ use eyre::Result;
 use std::io::Write;
 use tracing::debug;
 
+// H256 is used only by export_hashed for state_root parameter
+
 /// Export storage using hashed keys (fallback when preimages unavailable).
 /// Record format: [hashed_address: 32][hashed_slot: 32][value: 32] = 96 bytes
 pub fn export_hashed<W: Write>(store: &Store, state_root: H256, writer: &mut W) -> Result<u64> {
@@ -47,19 +49,16 @@ pub fn export_hashed<W: Write>(store: &Store, state_root: H256, writer: &mut W) 
 /// Record format: [address: 20][slot: 32][value: 32] = 84 bytes
 ///
 /// This requires the PLAIN_STORAGE table to be populated with preimages.
-pub async fn export_plain<W: Write>(
-    store: &Store,
-    state_root: H256,
-    writer: &mut W,
-) -> Result<u64> {
+///
+/// Note: This exports the **current** state from the PLAIN_STORAGE table,
+/// not a historical snapshot at a specific state_root.
+pub fn export_plain<W: Write>(store: &Store, writer: &mut W) -> Result<u64> {
     let mut count = 0u64;
     let mut record = [0u8; 84];
 
-    let iter = store.iter_plain_storage(state_root).await?;
-
-    for (address, slot, value) in iter {
+    store.iter_plain_storage(|address, slot, value| {
         if value.is_zero() {
-            continue;
+            return Ok(());
         }
 
         record[0..20].copy_from_slice(address.as_bytes());
@@ -72,7 +71,9 @@ pub async fn export_plain<W: Write>(
         if count.is_multiple_of(1_000_000) {
             debug!("Exported {} storage entries", count);
         }
-    }
+
+        Ok::<(), std::io::Error>(())
+    })?;
 
     Ok(count)
 }
