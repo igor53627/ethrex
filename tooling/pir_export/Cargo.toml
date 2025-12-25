@@ -1,0 +1,21 @@
+[package]
+name = "pir_export"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+documentation.workspace = true
+description = "Export UBT state snapshots for PIR database generation"
+
+[[bin]]
+name = "ethrex-pir-export"
+path = "src/main.rs"
+
+[dependencies]
+ethrex-common.workspace = true
+ethrex-storage = { workspace = true, features = ["rocksdb"] }
+ethrex-rlp.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+clap = { workspace = true, features = ["derive", "string"] }
+eyre.workspace = true

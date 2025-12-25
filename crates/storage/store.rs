@@ -7,7 +7,7 @@ use crate::{
         tables::{
             ACCOUNT_CODES, ACCOUNT_FLATKEYVALUE, ACCOUNT_TRIE_NODES, BLOCK_NUMBERS, BODIES,
             CANONICAL_BLOCK_HASHES, CHAIN_DATA, FULLSYNC_HEADERS, HEADERS, INVALID_CHAINS,
-            MISC_VALUES, PENDING_BLOCKS, RECEIPTS, SNAP_STATE, STORAGE_FLATKEYVALUE,
+            MISC_VALUES, PENDING_BLOCKS, PLAIN_STORAGE, RECEIPTS, SNAP_STATE, STORAGE_FLATKEYVALUE,
             STORAGE_TRIE_NODES, TRANSACTION_LOCATIONS,
         },
     },
@@ -171,6 +171,12 @@ pub struct UpdateBatch {
     pub receipts: Vec<(H256, Vec<Receipt>)>,
     /// Code updates
     pub code_updates: Vec<(H256, Code)>,
+    /// Plain storage updates for PIR export: (address, slot, value)
+    /// Stores original unhashed keys for efficient iteration
+    pub plain_storage_updates: Vec<(Address, H256, U256)>,
+    /// Addresses whose storage should be completely removed from PLAIN_STORAGE
+    /// This happens when an account is destroyed (e.g., via SELFDESTRUCT)
+    pub plain_storage_removed_accounts: Vec<Address>,
 }
 
 pub type StorageUpdates = Vec<(H256, Vec<(Nibbles, Vec<u8>)>)>;
@@ -180,6 +186,10 @@ pub struct AccountUpdatesList {
     pub state_updates: Vec<(Nibbles, Vec<u8>)>,
     pub storage_updates: StorageUpdates,
     pub code_updates: Vec<(H256, Code)>,
+    /// Plain storage updates for PIR export: (address, slot, value)
+    pub plain_storage_updates: Vec<(Address, H256, U256)>,
+    /// Addresses whose storage should be completely removed from PLAIN_STORAGE
+    pub plain_storage_removed_accounts: Vec<Address>,
 }
 
 impl Store {
@@ -1224,6 +1234,32 @@ impl Store {
             tx.put(ACCOUNT_CODES, code_hash.as_ref(), &buf)?;
         }
 
+        for address in update_batch.plain_storage_removed_accounts {
+            let prefix = address.as_bytes();
+            let read_tx = self.backend.begin_read()?;
+            let iter = read_tx.prefix_iterator(PLAIN_STORAGE, prefix)?;
+            for res in iter {
+                let (key, _) = res?;
+                if key.starts_with(prefix) {
+                    tx.delete(PLAIN_STORAGE, &key)?;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        for (address, slot, value) in update_batch.plain_storage_updates {
+            let mut key = [0u8; 52];
+            key[0..20].copy_from_slice(address.as_bytes());
+            key[20..52].copy_from_slice(slot.as_bytes());
+            if value.is_zero() {
+                tx.delete(PLAIN_STORAGE, &key)?;
+            } else {
+                let val = value.to_big_endian();
+                tx.put(PLAIN_STORAGE, &key, &val)?;
+            }
+        }
+
         // Wait for an updated top layer so every caller afterwards sees a consistent view.
         // Specifically, the next block produced MUST see this upper layer.
         wait_for_new_layer
@@ -1502,16 +1538,19 @@ impl Store {
     ) -> Result<AccountUpdatesList, StoreError> {
         let mut ret_storage_updates = Vec::new();
         let mut code_updates = Vec::new();
+        let mut plain_storage_updates = Vec::new();
+        let mut plain_storage_removed_accounts = Vec::new();
         let state_root = state_trie.hash_no_commit();
         for update in account_updates {
             let hashed_address = hash_address(&update.address);
             if update.removed {
-                // Remove account from trie
                 state_trie.remove(&hashed_address)?;
+                plain_storage_removed_accounts.push(update.address);
                 continue;
             }
-            // Add or update AccountState in the trie
-            // Fetch current state or create a new state to be inserted
+            if update.removed_storage {
+                plain_storage_removed_accounts.push(update.address);
+            }
             let mut account_state = match state_trie.get(&hashed_address)? {
                 Some(encoded_state) => AccountState::decode(&encoded_state)?,
                 None => AccountState::default(),
@@ -1523,12 +1562,10 @@ impl Store {
                 account_state.nonce = info.nonce;
                 account_state.balance = info.balance;
                 account_state.code_hash = info.code_hash;
-                // Store updated code in DB
                 if let Some(code) = &update.code {
                     code_updates.push((info.code_hash, code.clone()));
                 }
             }
-            // Store the added storage in the account's storage trie and compute its new root
             if !update.added_storage.is_empty() {
                 let mut storage_trie = self.open_storage_trie(
                     H256::from_slice(&hashed_address),
@@ -1542,6 +1579,7 @@ impl Store {
                     } else {
                         storage_trie.insert(hashed_key, storage_value.encode_to_vec())?;
                     }
+                    plain_storage_updates.push((update.address, *storage_key, *storage_value));
                 }
                 let (storage_hash, storage_updates) =
                     storage_trie.collect_changes_since_last_hash();
@@ -1557,6 +1595,8 @@ impl Store {
             state_updates,
             storage_updates: ret_storage_updates,
             code_updates,
+            plain_storage_updates,
+            plain_storage_removed_accounts,
         })
     }
 
@@ -1569,23 +1609,20 @@ impl Store {
         mut storage_tries: HashMap<Address, (TrieWitness, Trie)>,
     ) -> Result<(HashMap<Address, (TrieWitness, Trie)>, AccountUpdatesList), StoreError> {
         let mut ret_storage_updates = Vec::new();
-
         let mut code_updates = Vec::new();
-
+        let mut plain_storage_updates = Vec::new();
+        let mut plain_storage_removed_accounts = Vec::new();
         let state_root = state_trie.hash_no_commit();
 
         for update in account_updates.iter() {
             let hashed_address = hash_address(&update.address);
 
             if update.removed {
-                // Remove account from trie
                 state_trie.remove(&hashed_address)?;
-
+                plain_storage_removed_accounts.push(update.address);
                 continue;
             }
 
-            // Add or update AccountState in the trie
-            // Fetch current state or create a new state to be inserted
             let mut account_state = match state_trie.get(&hashed_address)? {
                 Some(encoded_state) => AccountState::decode(&encoded_state)?,
                 None => AccountState::default(),
@@ -1593,22 +1630,18 @@ impl Store {
 
             if update.removed_storage {
                 account_state.storage_root = *EMPTY_TRIE_HASH;
+                plain_storage_removed_accounts.push(update.address);
             }
 
             if let Some(info) = &update.info {
                 account_state.nonce = info.nonce;
-
                 account_state.balance = info.balance;
-
                 account_state.code_hash = info.code_hash;
-
-                // Store updated code in DB
                 if let Some(code) = &update.code {
                     code_updates.push((info.code_hash, code.clone()));
                 }
             }
 
-            // Store the added storage in the account's storage trie and compute its new root
             if !update.added_storage.is_empty() {
                 let (_witness, storage_trie) = match storage_tries.entry(update.address) {
                     Entry::Occupied(value) => value.into_mut(),
@@ -1624,19 +1657,17 @@ impl Store {
 
                 for (storage_key, storage_value) in &update.added_storage {
                     let hashed_key = hash_key(storage_key);
-
                     if storage_value.is_zero() {
                         storage_trie.remove(&hashed_key)?;
                     } else {
                         storage_trie.insert(hashed_key, storage_value.encode_to_vec())?;
                     }
+                    plain_storage_updates.push((update.address, *storage_key, *storage_value));
                 }
 
                 let (storage_hash, storage_updates) =
                     storage_trie.collect_changes_since_last_hash();
-
                 account_state.storage_root = storage_hash;
-
                 ret_storage_updates.push((H256::from_slice(&hashed_address), storage_updates));
             }
 
@@ -1650,6 +1681,8 @@ impl Store {
             state_updates,
             storage_updates: ret_storage_updates,
             code_updates,
+            plain_storage_updates,
+            plain_storage_removed_accounts,
         };
 
         Ok((storage_tries, account_updates_list))
@@ -2054,6 +2087,43 @@ impl Store {
         hashed_address: H256,
     ) -> Result<Option<impl Iterator<Item = (H256, U256)>>, StoreError> {
         self.iter_storage_from(state_root, hashed_address, H256::zero())
+    }
+
+    /// Iterates over all storage slots in the PLAIN_STORAGE table, calling the
+    /// provided callback for each entry.
+    ///
+    /// This is a streaming API that processes entries one at a time without
+    /// loading the entire dataset into memory.
+    ///
+    /// Note: This iterates over the **current** state as stored in PLAIN_STORAGE,
+    /// not a historical snapshot at a specific state_root. The PLAIN_STORAGE table
+    /// reflects the latest committed state.
+    ///
+    /// Returns the number of entries processed, or an error if the callback
+    /// returns an error.
+    pub fn iter_plain_storage<F, E>(&self, mut callback: F) -> Result<u64, StoreError>
+    where
+        F: FnMut(Address, H256, U256) -> Result<(), E>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let tx = self.backend.begin_read()?;
+        let iter = tx.prefix_iterator(PLAIN_STORAGE, &[])?;
+
+        let mut count = 0u64;
+        for res in iter {
+            let (key, value) = res?;
+            if key.len() != 52 || value.len() != 32 {
+                continue;
+            }
+            let address = Address::from_slice(&key[0..20]);
+            let slot = H256::from_slice(&key[20..52]);
+            let val = U256::from_big_endian(&value);
+
+            callback(address, slot, val).map_err(|e| StoreError::Custom(e.to_string()))?;
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     pub fn get_account_range_proof(
