@@ -20,7 +20,8 @@ use ethrex_common::types::requests::{EncodedRequests, Requests, compute_requests
 use ethrex_common::types::{
     AccountState, AccountUpdate, Block, BlockHash, BlockHeader, BlockNumber, ChainConfig, Code,
     EIP4844Transaction, Receipt, Transaction, WrappedEIP4844Transaction, compute_receipts_root,
-    validate_block_header, validate_cancun_header_fields, validate_prague_header_fields,
+    validate_block_header, validate_cancun_header_fields, validate_post_merge_block_body,
+    validate_post_merge_header_fields, validate_prague_header_fields,
     validate_pre_cancun_header_fields,
 };
 use ethrex_common::types::{ELASTICITY_MULTIPLIER, P2PTransaction};
@@ -1936,6 +1937,12 @@ pub fn validate_block(
     // Verify initial header validity against parent
     validate_block_header(&block.header, parent_header, elasticity_multiplier)
         .map_err(InvalidBlockError::from)?;
+
+    // Validate post-merge (Paris/EIP-3675) fields: difficulty=0, nonce=0, ommers=default, empty uncles
+    if chain_config.is_paris_activated(block.header.number) {
+        validate_post_merge_header_fields(&block.header).map_err(InvalidBlockError::from)?;
+        validate_post_merge_block_body(&block.body).map_err(InvalidBlockError::from)?;
+    }
 
     if chain_config.is_osaka_activated(block.header.timestamp) {
         let block_rlp_size = block.length();

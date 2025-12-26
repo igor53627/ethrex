@@ -652,6 +652,18 @@ pub fn validate_block_header(
         return Err(InvalidBlockHeaderError::ExtraDataTooLong);
     }
 
+    if header.parent_hash != parent_header.hash() {
+        return Err(InvalidBlockHeaderError::ParentHashIncorrect);
+    }
+
+    Ok(())
+}
+
+/// Validates post-merge (Paris) header fields
+/// These checks only apply after The Merge (EIP-3675)
+pub fn validate_post_merge_header_fields(
+    header: &BlockHeader,
+) -> Result<(), InvalidBlockHeaderError> {
     if !header.difficulty.is_zero() {
         return Err(InvalidBlockHeaderError::DifficultyNotZero);
     }
@@ -664,29 +676,21 @@ pub fn validate_block_header(
         return Err(InvalidBlockHeaderError::OmmersHashNotDefault);
     }
 
-    if header.parent_hash != parent_header.hash() {
-        return Err(InvalidBlockHeaderError::ParentHashIncorrect);
-    }
-
     Ok(())
 }
 
 /// Validates that the body matches with the header
+/// Note: Post-merge ommers validation should be done separately via validate_post_merge_block_body
 pub fn validate_block_body(
     block_header: &BlockHeader,
     block_body: &BlockBody,
 ) -> Result<(), InvalidBlockBodyError> {
     // Validates that:
     //  - Transactions root and withdrawals root matches with the header
-    //  - Ommers is empty -> https://eips.ethereum.org/EIPS/eip-3675
     let computed_tx_root = compute_transactions_root(&block_body.transactions);
 
     if block_header.transactions_root != computed_tx_root {
         return Err(InvalidBlockBodyError::TransactionsRootNotMatch);
-    }
-
-    if !block_body.ommers.is_empty() {
-        return Err(InvalidBlockBodyError::OmmersIsNotEmpty);
     }
 
     match (block_header.withdrawals_root, &block_body.withdrawals) {
@@ -705,6 +709,17 @@ pub fn validate_block_body(
         _ => return Err(InvalidBlockBodyError::WithdrawalsRootNotMatch),
     }
 
+    Ok(())
+}
+
+/// Validates post-merge (Paris) body fields
+/// Ommers must be empty after The Merge (EIP-3675)
+pub fn validate_post_merge_block_body(
+    block_body: &BlockBody,
+) -> Result<(), InvalidBlockBodyError> {
+    if !block_body.ommers.is_empty() {
+        return Err(InvalidBlockBodyError::OmmersIsNotEmpty);
+    }
     Ok(())
 }
 
