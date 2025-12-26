@@ -4,7 +4,7 @@ Export UBT (Unified Binary Trie) state snapshots for PIR (Private Information Re
 
 ## Overview
 
-This tool exports Ethereum state from ethrex in a fixed-size binary format suitable for building PIR databases. It's designed to work as a sidecar to ethrex, enabling integration with [inspire-exex](https://github.com/igor53627/inspire-exex) for private Ethereum state queries.
+This tool exports Ethereum state from ethrex in the PIR2 binary format suitable for building PIR databases. It's designed to work as a sidecar to ethrex, enabling integration with [inspire-exex](https://github.com/igor53627/inspire-exex) for private Ethereum state queries.
 
 ## Usage
 
@@ -18,27 +18,65 @@ ethrex-pir-export \
 ### Options
 
 - `--datadir <PATH>`: Path to ethrex data directory (required)
-- `--block <N>`: Block number to export state from (defaults to latest finalized)
+- `--block <N>`: Block number to export state from (only used for hashed mode; plain mode always exports current state)
 - `--output <PATH>`: Output file path for the state export (required)
-- `--hashed`: Use hashed keys mode (96-byte records) when preimages unavailable
+- `--hashed`: Use hashed keys mode (legacy, 96-byte records, no header)
 
-## Output Formats
+## Output Format (PIR2)
 
-### Plain Keys Mode (default, 84 bytes per record)
+The output uses the STATE_FORMAT.md specification:
+
+### File Layout
 
 ```
-[address: 20 bytes][slot: 32 bytes][value: 32 bytes]
++------------------+
+| Header (64 bytes)|
++------------------+
+| Entry 0 (84 B)   |
++------------------+
+| Entry 1 (84 B)   |
++------------------+
+| ...              |
++------------------+
+| Entry N-1 (84 B) |
++------------------+
 ```
 
-This mode requires the node to have been synced with UBT tracking enabled, which populates the `PLAIN_STORAGE` table with original (unhashed) keys.
+### Header (64 bytes)
 
-### Hashed Keys Mode (96 bytes per record)
+| Offset | Size | Field        | Description                     |
+|--------|------|--------------|-------------------------------- |
+| 0      | 4    | magic        | `0x50495232` ("PIR2" in ASCII)  |
+| 4      | 2    | version      | Format version (1)              |
+| 6      | 2    | entry_size   | Bytes per entry (84)            |
+| 8      | 8    | entry_count  | Number of entries               |
+| 16     | 8    | block_number | Snapshot block number           |
+| 24     | 8    | chain_id     | Ethereum chain ID               |
+| 32     | 32   | block_hash   | Block hash                      |
+
+All header integers are little-endian.
+
+### Entry Format (84 bytes)
+
+| Offset | Size | Field   | Description      |
+|--------|------|---------|------------------|
+| 0      | 20   | address | Contract address |
+| 20     | 32   | slot    | Storage slot key |
+| 52     | 32   | value   | Storage value (big-endian, as per EVM convention) |
+
+### Entry Ordering
+
+Entries are sorted by `keccak256(address || slot)` for bucket index compatibility with the PIR database layout.
+
+## Hashed Keys Mode (Legacy)
+
+When `--hashed` is specified, uses 96-byte records without the PIR2 header:
 
 ```
 [hashed_address: 32 bytes][hashed_slot: 32 bytes][value: 32 bytes]
 ```
 
-Fallback mode that works with any ethrex node but uses keccak-hashed keys.
+This is a fallback mode that works with any ethrex node but uses keccak-hashed keys and does not support the inspire-setup PIR encoder.
 
 ## Integration with inspire-exex
 
@@ -47,7 +85,7 @@ Data flow:
 ```
 ethrex (synced with UBT)
     --> ethrex-pir-export
-    --> state.bin
+    --> state.bin (PIR2 format)
     --> inspire-setup (encode PIR database)
     --> db.bin
     --> inspire-server (serve queries)
@@ -57,6 +95,10 @@ ethrex (synced with UBT)
 
 - ethrex node synced with UBT tracking enabled (for plain keys mode)
 - RocksDB storage backend
+- **Memory**: Plain mode requires ~116 bytes per entry in RAM for sorting
+  - 32-byte sort key + 84-byte entry data
+  - Mainnet (~150M entries): ~17.4 GB RAM
+  - Recommend 20-30% headroom (e.g., 24 GB for mainnet exports)
 
 ## Building
 
@@ -67,7 +109,29 @@ cargo build --release -p pir_export
 
 The binary will be at `target/release/ethrex-pir-export`.
 
+## Example Output
+
+```
+2025-01-15T10:30:00 INFO ethrex_pir_export: Opening store at "/data/ethrex"
+2025-01-15T10:30:01 INFO ethrex_pir_export: Exporting current state (as of block 20000000)
+2025-01-15T10:30:01 INFO ethrex_pir_export: Using plain keys mode (PIR2 format, 84-byte records)
+2025-01-15T10:35:00 INFO exporter: Collected 150000000 entries, sorting by keccak256(address || slot)...
+2025-01-15T10:36:00 INFO exporter: Writing header and 150000000 entries...
+2025-01-15T10:40:00 INFO ethrex_pir_export: --- Export Summary ---
+2025-01-15T10:40:00 INFO ethrex_pir_export: Format:       PIR2 v1
+2025-01-15T10:40:00 INFO ethrex_pir_export: Magic:        "PIR2"
+2025-01-15T10:40:00 INFO ethrex_pir_export: Header size:  64 bytes
+2025-01-15T10:40:00 INFO ethrex_pir_export: Entry size:   84 bytes
+2025-01-15T10:40:00 INFO ethrex_pir_export: Entry count:  150000000
+2025-01-15T10:40:00 INFO ethrex_pir_export: Block number: 20000000
+2025-01-15T10:40:00 INFO ethrex_pir_export: Chain ID:     1
+2025-01-15T10:40:00 INFO ethrex_pir_export: Block hash:   0xabcd...
+2025-01-15T10:40:00 INFO ethrex_pir_export: Total size:   12600000064 bytes (12017.36 MB)
+2025-01-15T10:40:00 INFO ethrex_pir_export: Export complete: "/data/state.bin"
+```
+
 ## Related
 
 - [inspire-exex](https://github.com/igor53627/inspire-exex) - PIR system for private Ethereum queries
+- [STATE_FORMAT.md](https://github.com/igor53627/inspire-exex/blob/main/docs/STATE_FORMAT.md) - Format specification
 - [EIP-7864](https://eips.ethereum.org/EIPS/eip-7864) - Ethereum State Using a Unified Binary Trie
