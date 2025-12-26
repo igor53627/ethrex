@@ -652,6 +652,18 @@ pub fn validate_block_header(
         return Err(InvalidBlockHeaderError::ExtraDataTooLong);
     }
 
+    if header.parent_hash != parent_header.hash() {
+        return Err(InvalidBlockHeaderError::ParentHashIncorrect);
+    }
+
+    Ok(())
+}
+
+/// Validates post-merge (Paris) header fields
+/// These checks only apply after The Merge (EIP-3675)
+pub fn validate_post_merge_header_fields(
+    header: &BlockHeader,
+) -> Result<(), InvalidBlockHeaderError> {
     if !header.difficulty.is_zero() {
         return Err(InvalidBlockHeaderError::DifficultyNotZero);
     }
@@ -662,10 +674,6 @@ pub fn validate_block_header(
 
     if header.ommers_hash != *DEFAULT_OMMERS_HASH {
         return Err(InvalidBlockHeaderError::OmmersHashNotDefault);
-    }
-
-    if header.parent_hash != parent_header.hash() {
-        return Err(InvalidBlockHeaderError::ParentHashIncorrect);
     }
 
     Ok(())

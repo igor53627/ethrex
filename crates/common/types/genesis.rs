@@ -392,6 +392,12 @@ impl ChainConfig {
         self.eip155_block.is_some_and(|num| num <= block_number)
     }
 
+    /// Returns true if Paris (The Merge) is activated for the given block number
+    pub fn is_paris_activated(&self, block_number: BlockNumber) -> bool {
+        self.merge_netsplit_block
+            .is_some_and(|num| num <= block_number)
+    }
+
     pub fn display_config(&self) -> String {
         let network = NETWORK_NAMES.get(&self.chain_id).unwrap_or(&"unknown");
         let mut output = format!("Chain ID: {} ({})\n\n", self.chain_id, network);
