@@ -36,8 +36,10 @@ use crate::eth::{
         GetTransactionByHashRequest, GetTransactionReceiptRequest,
     },
 };
+use crate::pir::{DumpStorageRequest, GetStateDeltaRequest};
 use crate::tracing::{TraceBlockByNumberRequest, TraceTransactionRequest};
 use crate::types::transaction::SendRawTransactionRequest;
+use crate::ubt::GetRootRequest;
 use crate::utils::{
     RpcErr, RpcErrorMetadata, RpcErrorResponse, RpcNamespace, RpcRequest, RpcRequestId,
     RpcSuccessResponse,
@@ -492,6 +494,8 @@ pub async fn map_http_requests(req: &RpcRequest, context: RpcApiContext) -> Resu
         Ok(RpcNamespace::Web3) => map_web3_requests(req, context),
         Ok(RpcNamespace::Net) => map_net_requests(req, context).await,
         Ok(RpcNamespace::Mempool) => map_mempool_requests(req, context),
+        Ok(RpcNamespace::Ubt) => map_ubt_requests(req, context).await,
+        Ok(RpcNamespace::Pir) => map_pir_requests(req, context).await,
         Ok(RpcNamespace::Engine) => Err(RpcErr::Internal(
             "Engine namespace not allowed in map_http_requests".to_owned(),
         )),
@@ -644,6 +648,21 @@ pub fn map_mempool_requests(req: &RpcRequest, contex: RpcApiContext) -> Result<V
         "txpool_content" => mempool::content(contex),
         "txpool_status" => mempool::status(contex),
         unknown_mempool_method => Err(RpcErr::MethodNotFound(unknown_mempool_method.to_owned())),
+    }
+}
+
+pub async fn map_ubt_requests(req: &RpcRequest, context: RpcApiContext) -> Result<Value, RpcErr> {
+    match req.method.as_str() {
+        "ubt_getRoot" => GetRootRequest::call(req, context).await,
+        unknown_ubt_method => Err(RpcErr::MethodNotFound(unknown_ubt_method.to_owned())),
+    }
+}
+
+pub async fn map_pir_requests(req: &RpcRequest, context: RpcApiContext) -> Result<Value, RpcErr> {
+    match req.method.as_str() {
+        "pir_getStateDelta" => GetStateDeltaRequest::call(req, context).await,
+        "pir_dumpStorage" => DumpStorageRequest::call(req, context).await,
+        unknown_pir_method => Err(RpcErr::MethodNotFound(unknown_pir_method.to_owned())),
     }
 }
 

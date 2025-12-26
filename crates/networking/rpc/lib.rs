@@ -8,8 +8,10 @@ mod engine;
 mod eth;
 mod mempool;
 mod net;
+mod pir;
 mod rpc;
 mod tracing;
+mod ubt;
 
 pub mod clients;
 pub mod types;
