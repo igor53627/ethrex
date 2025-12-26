@@ -18,7 +18,7 @@ ethrex-pir-export \
 ### Options
 
 - `--datadir <PATH>`: Path to ethrex data directory (required)
-- `--block <N>`: Block number to export state from (defaults to latest finalized)
+- `--block <N>`: Block number to export state from (only used for hashed mode; plain mode always exports current state)
 - `--output <PATH>`: Output file path for the state export (required)
 - `--hashed`: Use hashed keys mode (legacy, 96-byte records, no header)
 
@@ -54,7 +54,7 @@ The output uses the STATE_FORMAT.md specification:
 | 24     | 8    | chain_id     | Ethereum chain ID               |
 | 32     | 32   | block_hash   | Block hash                      |
 
-All integers are little-endian.
+All header integers are little-endian.
 
 ### Entry Format (84 bytes)
 
@@ -62,7 +62,7 @@ All integers are little-endian.
 |--------|------|---------|------------------|
 | 0      | 20   | address | Contract address |
 | 20     | 32   | slot    | Storage slot key |
-| 52     | 32   | value   | Storage value    |
+| 52     | 32   | value   | Storage value (big-endian, as per EVM convention) |
 
 ### Entry Ordering
 
@@ -95,6 +95,10 @@ ethrex (synced with UBT)
 
 - ethrex node synced with UBT tracking enabled (for plain keys mode)
 - RocksDB storage backend
+- **Memory**: Plain mode requires ~116 bytes per entry in RAM for sorting
+  - 32-byte sort key + 84-byte entry data
+  - Mainnet (~150M entries): ~17.4 GB RAM
+  - Recommend 20-30% headroom (e.g., 24 GB for mainnet exports)
 
 ## Building
 
@@ -109,8 +113,7 @@ The binary will be at `target/release/ethrex-pir-export`.
 
 ```
 2025-01-15T10:30:00 INFO ethrex_pir_export: Opening store at "/data/ethrex"
-2025-01-15T10:30:01 INFO ethrex_pir_export: Using latest finalized block: 20000000
-2025-01-15T10:30:01 INFO ethrex_pir_export: Exporting state at block 20000000 with state_root 0x1234...
+2025-01-15T10:30:01 INFO ethrex_pir_export: Exporting current state (as of block 20000000)
 2025-01-15T10:30:01 INFO ethrex_pir_export: Using plain keys mode (PIR2 format, 84-byte records)
 2025-01-15T10:35:00 INFO exporter: Collected 150000000 entries, sorting by keccak256(address || slot)...
 2025-01-15T10:36:00 INFO exporter: Writing header and 150000000 entries...

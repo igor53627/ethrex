@@ -3,7 +3,7 @@ use ethrex_storage::{EngineType, Store};
 use eyre::Result;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tracing::{Level, info};
+use tracing::{Level, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 mod exporter;
@@ -19,7 +19,8 @@ struct Args {
     #[arg(long)]
     datadir: PathBuf,
 
-    /// Block number to export state from (defaults to latest finalized)
+    /// Block number to export state from (only used for hashed mode)
+    /// For plain mode, this is ignored as PLAIN_STORAGE always contains current state
     #[arg(long)]
     block: Option<u64>,
 
@@ -48,46 +49,64 @@ async fn main() -> Result<()> {
     let chain_config = store.get_chain_config();
     let chain_id = chain_config.chain_id;
 
-    let block_number = match args.block {
-        Some(n) => n,
-        None => {
-            let finalized = store
-                .get_finalized_block_number()
-                .await?
-                .ok_or_else(|| eyre::eyre!("No finalized block found"))?;
-            info!("Using latest finalized block: {}", finalized);
-            finalized
-        }
-    };
-
-    let header = store
-        .get_block_header(block_number)?
-        .ok_or_else(|| eyre::eyre!("Block {} not found", block_number))?;
-
-    let state_root = header.state_root;
-    let block_hash = header.hash();
-
-    info!(
-        "Exporting state at block {} with state_root {:?}",
-        block_number, state_root
-    );
-
     let output_file = std::fs::File::create(&args.output)?;
     let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, output_file);
 
     if args.hashed {
+        let block_number = match args.block {
+            Some(n) => n,
+            None => {
+                let finalized = store
+                    .get_finalized_block_number()
+                    .await?
+                    .ok_or_else(|| eyre::eyre!("No finalized block found"))?;
+                info!("Using latest finalized block: {}", finalized);
+                finalized
+            }
+        };
+
+        let header = store
+            .get_block_header(block_number)?
+            .ok_or_else(|| eyre::eyre!("Block {} not found", block_number))?;
+
+        let state_root = header.state_root;
+
+        info!(
+            "Exporting state at block {} with state_root {:?}",
+            block_number, state_root
+        );
+
         info!("Using hashed keys mode (96-byte records, legacy format without header)");
         let count = exporter::export_hashed(&store, state_root, &mut writer)?;
         info!("Exported {} storage entries", count);
     } else {
-        info!("Using plain keys mode (PIR2 format, 84-byte records)");
-        info!(
-            "Note: Plain mode exports current state, not historical state at block {}",
-            block_number
-        );
+        if args.block.is_some() {
+            warn!(
+                "--block option is ignored in plain mode (PLAIN_STORAGE always contains current state)"
+            );
+        }
 
-        let count =
-            exporter::export_plain(&store, block_number, chain_id, block_hash, &mut writer)?;
+        let latest_block_number = store.get_latest_block_number().await?;
+
+        let latest_header = store
+            .get_block_header(latest_block_number)?
+            .ok_or_else(|| eyre::eyre!("Latest block {} not found", latest_block_number))?;
+
+        let block_hash = latest_header.hash();
+
+        info!(
+            "Exporting current state (as of block {})",
+            latest_block_number
+        );
+        info!("Using plain keys mode (PIR2 format, 84-byte records)");
+
+        let count = exporter::export_plain(
+            &store,
+            latest_block_number,
+            chain_id,
+            block_hash,
+            &mut writer,
+        )?;
 
         info!("--- Export Summary ---");
         info!("Format:       PIR2 v{}", STATE_VERSION);
@@ -98,7 +117,7 @@ async fn main() -> Result<()> {
         info!("Header size:  {} bytes", STATE_HEADER_SIZE);
         info!("Entry size:   {} bytes", STATE_ENTRY_SIZE_PLAIN);
         info!("Entry count:  {}", count);
-        info!("Block number: {}", block_number);
+        info!("Block number: {}", latest_block_number);
         info!("Chain ID:     {}", chain_id);
         info!("Block hash:   {:#x}", block_hash);
         info!(
