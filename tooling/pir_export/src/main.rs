@@ -8,6 +8,8 @@ use tracing_subscriber::FmtSubscriber;
 
 mod exporter;
 
+use exporter::{STATE_ENTRY_SIZE_PLAIN, STATE_HEADER_SIZE, STATE_MAGIC, STATE_VERSION};
+
 #[derive(Parser, Debug)]
 #[command(name = "ethrex-pir-export")]
 #[command(about = "Export UBT state snapshots for PIR database generation")]
@@ -26,6 +28,7 @@ struct Args {
     output: PathBuf,
 
     /// Export using hashed keys (fallback mode when preimages unavailable)
+    /// Note: Hashed mode uses legacy format without PIR2 header
     #[arg(long, default_value = "false")]
     hashed: bool,
 }
@@ -41,6 +44,9 @@ async fn main() -> Result<()> {
 
     info!("Opening store at {:?}", args.datadir);
     let store = Store::new(&args.datadir, EngineType::RocksDB)?;
+
+    let chain_config = store.get_chain_config();
+    let chain_id = chain_config.chain_id;
 
     let block_number = match args.block {
         Some(n) => n,
@@ -59,6 +65,8 @@ async fn main() -> Result<()> {
         .ok_or_else(|| eyre::eyre!("Block {} not found", block_number))?;
 
     let state_root = header.state_root;
+    let block_hash = header.hash();
+
     info!(
         "Exporting state at block {} with state_root {:?}",
         block_number, state_root
@@ -68,14 +76,36 @@ async fn main() -> Result<()> {
     let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, output_file);
 
     if args.hashed {
-        info!("Using hashed keys mode (96-byte records)");
+        info!("Using hashed keys mode (96-byte records, legacy format without header)");
         let count = exporter::export_hashed(&store, state_root, &mut writer)?;
         info!("Exported {} storage entries", count);
     } else {
-        info!("Using plain keys mode (84-byte records)");
-        info!("Note: Plain mode exports current state, not historical state at block {}", block_number);
-        let count = exporter::export_plain(&store, &mut writer)?;
-        info!("Exported {} storage entries", count);
+        info!("Using plain keys mode (PIR2 format, 84-byte records)");
+        info!(
+            "Note: Plain mode exports current state, not historical state at block {}",
+            block_number
+        );
+
+        let count =
+            exporter::export_plain(&store, block_number, chain_id, block_hash, &mut writer)?;
+
+        info!("--- Export Summary ---");
+        info!("Format:       PIR2 v{}", STATE_VERSION);
+        info!(
+            "Magic:        {:?}",
+            std::str::from_utf8(&STATE_MAGIC).unwrap_or("????")
+        );
+        info!("Header size:  {} bytes", STATE_HEADER_SIZE);
+        info!("Entry size:   {} bytes", STATE_ENTRY_SIZE_PLAIN);
+        info!("Entry count:  {}", count);
+        info!("Block number: {}", block_number);
+        info!("Chain ID:     {}", chain_id);
+        info!("Block hash:   {:#x}", block_hash);
+        info!(
+            "Total size:   {} bytes ({:.2} MB)",
+            STATE_HEADER_SIZE + (count as usize * STATE_ENTRY_SIZE_PLAIN),
+            (STATE_HEADER_SIZE + (count as usize * STATE_ENTRY_SIZE_PLAIN)) as f64 / 1_048_576.0
+        );
     }
 
     writer.flush()?;
