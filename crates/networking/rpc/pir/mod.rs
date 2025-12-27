@@ -1,12 +1,26 @@
+//! PIR (Private Information Retrieval) RPC endpoints for state export.
+//!
+//! These endpoints are designed for PIR database servers that need to:
+//! 1. Initial sync: dump full state via `pir_dumpStorage`
+//! 2. Incremental updates: fetch deltas via `pir_getStateDelta` (not yet implemented)
+//!
+//! # Security Warning
+//! These endpoints expose full EVM state and can be resource-intensive.
+//! Consider auth-gating in production (see issue #23).
+
 use crate::utils::RpcErr;
 use crate::{RpcApiContext, RpcHandler};
 use ethrex_common::{Address, H256, U256};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Maximum number of blocks allowed per `pir_getStateDelta` call.
 const MAX_DELTA_BLOCKS: u64 = 100;
+
+/// Maximum number of storage entries returned per `pir_dumpStorage` call.
 const MAX_DUMP_ENTRIES: usize = 10_000;
 
+/// A single storage slot change.
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct StorageDelta {
@@ -15,6 +29,7 @@ pub struct StorageDelta {
     pub value: U256,
 }
 
+/// Response for `pir_getStateDelta`.
 #[derive(Debug, Serialize)]
 #[allow(dead_code)]
 pub struct GetStateDeltaResponse {
@@ -23,10 +38,35 @@ pub struct GetStateDeltaResponse {
     pub deltas: Vec<StorageDelta>,
 }
 
+/// RPC request for `pir_getStateDelta`.
+///
+/// Returns storage changes between two blocks. Not yet implemented -
+/// requires historical state delta tracking infrastructure.
+///
+/// # Parameters
+/// - `from_block`: Starting block number (u64 or hex string)
+/// - `to_block`: Ending block number (u64 or hex string)
+///
+/// # Limits
+/// - Maximum 100 blocks per call
 #[allow(dead_code)]
 pub struct GetStateDeltaRequest {
     from_block: u64,
     to_block: u64,
+}
+
+/// Parse a block number from JSON value, accepting both numeric and hex string formats.
+fn parse_block_number(value: &Value) -> Result<u64, RpcErr> {
+    if let Some(n) = value.as_u64() {
+        Ok(n)
+    } else if let Some(s) = value.as_str() {
+        u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|_| RpcErr::BadParams("Invalid block number format".to_string()))
+    } else {
+        Err(RpcErr::BadParams(
+            "block_number must be a number or hex string".to_string(),
+        ))
+    }
 }
 
 impl RpcHandler for GetStateDeltaRequest {
@@ -35,17 +75,15 @@ impl RpcHandler for GetStateDeltaRequest {
             .as_ref()
             .ok_or(RpcErr::MissingParam("params".to_string()))?;
 
-        let from_block = params
+        let from_block_val = params
             .first()
-            .ok_or(RpcErr::MissingParam("from_block".to_string()))?
-            .as_u64()
-            .ok_or(RpcErr::BadParams("from_block must be a number".to_string()))?;
+            .ok_or(RpcErr::MissingParam("from_block".to_string()))?;
+        let from_block = parse_block_number(from_block_val)?;
 
-        let to_block = params
+        let to_block_val = params
             .get(1)
-            .ok_or(RpcErr::MissingParam("to_block".to_string()))?
-            .as_u64()
-            .ok_or(RpcErr::BadParams("to_block must be a number".to_string()))?;
+            .ok_or(RpcErr::MissingParam("to_block".to_string()))?;
+        let to_block = parse_block_number(to_block_val)?;
 
         if to_block < from_block {
             return Err(RpcErr::BadParams(
@@ -74,6 +112,7 @@ impl RpcHandler for GetStateDeltaRequest {
     }
 }
 
+/// A single storage entry for `pir_dumpStorage` response.
 #[derive(Debug, Serialize)]
 pub struct DumpStorageEntry {
     pub address: Address,
@@ -81,13 +120,31 @@ pub struct DumpStorageEntry {
     pub value: U256,
 }
 
+/// Response for `pir_dumpStorage`.
 #[derive(Debug, Serialize)]
 pub struct DumpStorageResponse {
+    /// Storage entries for this page.
     pub entries: Vec<DumpStorageEntry>,
+    /// Cursor for fetching the next page, or None if no more entries.
     pub next_cursor: Option<String>,
+    /// Whether there are more entries after this page.
     pub has_more: bool,
 }
 
+/// RPC request for `pir_dumpStorage`.
+///
+/// Dumps all non-zero storage slots from PLAIN_STORAGE with cursor-based pagination.
+/// Entries are ordered lexicographically by (address, slot).
+///
+/// # Parameters
+/// - `cursor`: Optional 52-byte hex string (20-byte address + 32-byte slot) for pagination.
+///   Pass `null` or omit to start from the beginning.
+/// - `limit`: Optional maximum entries per page (default 1000, max 10000).
+///
+/// # Response
+/// - `entries`: Array of {address, slot, value} objects
+/// - `next_cursor`: Cursor for next page, or null if no more entries
+/// - `has_more`: Boolean indicating if more entries exist
 pub struct DumpStorageRequest {
     cursor: Option<(Address, H256)>,
     limit: usize,
