@@ -61,3 +61,4 @@ redundant_clone = "warn"
 
 [features]
 jemalloc_profiling = ["dep:jemalloc_pprof"]
+ubt = ["ethrex-storage/ubt"]
