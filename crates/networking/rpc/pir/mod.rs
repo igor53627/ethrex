@@ -1,6 +1,5 @@
 use crate::utils::RpcErr;
 use crate::{RpcApiContext, RpcHandler};
-use ethrex_common::utils::keccak;
 use ethrex_common::{Address, H256, U256};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,9 +53,10 @@ impl RpcHandler for GetStateDeltaRequest {
             ));
         }
 
-        if to_block - from_block > MAX_DELTA_BLOCKS {
+        let block_count = to_block - from_block + 1;
+        if block_count > MAX_DELTA_BLOCKS {
             return Err(RpcErr::BadParams(format!(
-                "Range exceeds maximum of {MAX_DELTA_BLOCKS} blocks"
+                "Block count {block_count} exceeds maximum of {MAX_DELTA_BLOCKS} blocks"
             )));
         }
 
@@ -67,8 +67,8 @@ impl RpcHandler for GetStateDeltaRequest {
     }
 
     async fn handle(&self, _context: RpcApiContext) -> Result<Value, RpcErr> {
-        Err(RpcErr::Internal(
-            "pir_getStateDelta not yet implemented: requires historical state delta tracking"
+        Err(RpcErr::MethodNotFound(
+            "pir_getStateDelta: not yet implemented, requires historical state delta tracking"
                 .to_string(),
         ))
     }
@@ -131,11 +131,13 @@ impl RpcHandler for DumpStorageRequest {
         };
 
         let limit = if let Some(params) = params {
-            params
-                .get(1)
-                .and_then(|v| v.as_u64())
-                .map(|l| l as usize)
-                .unwrap_or(1000)
+            match params.get(1) {
+                None | Some(Value::Null) => 1000,
+                Some(v) => v
+                    .as_u64()
+                    .ok_or_else(|| RpcErr::BadParams("limit must be a number".to_string()))?
+                    as usize,
+            }
         } else {
             1000
         };
@@ -157,36 +159,33 @@ impl RpcHandler for DumpStorageRequest {
         let mut entries = Vec::with_capacity(self.limit + 1);
         let cursor_ref = &self.cursor;
         let limit = self.limit;
+        let mut done = false;
 
         context
             .storage
             .iter_plain_storage(|address, slot, value| {
-                if value.is_zero() {
+                if done {
                     return Ok::<(), std::io::Error>(());
                 }
 
-                if let Some((cursor_addr, cursor_slot)) = cursor_ref {
-                    let mut current_concat = [0u8; 52];
-                    current_concat[0..20].copy_from_slice(address.as_bytes());
-                    current_concat[20..52].copy_from_slice(slot.as_bytes());
-                    let current_key = keccak(current_concat).0;
-
-                    let mut cursor_concat = [0u8; 52];
-                    cursor_concat[0..20].copy_from_slice(cursor_addr.as_bytes());
-                    cursor_concat[20..52].copy_from_slice(cursor_slot.as_bytes());
-                    let cursor_key = keccak(cursor_concat).0;
-
-                    if current_key <= cursor_key {
-                        return Ok(());
-                    }
+                if value.is_zero() {
+                    return Ok(());
                 }
 
-                if entries.len() <= limit {
-                    entries.push(DumpStorageEntry {
-                        address,
-                        slot,
-                        value,
-                    });
+                if let Some((cursor_addr, cursor_slot)) = cursor_ref
+                    && (address, slot) <= (*cursor_addr, *cursor_slot)
+                {
+                    return Ok(());
+                }
+
+                entries.push(DumpStorageEntry {
+                    address,
+                    slot,
+                    value,
+                });
+
+                if entries.len() > limit {
+                    done = true;
                 }
 
                 Ok(())

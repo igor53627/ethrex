@@ -38,9 +38,9 @@ impl RpcHandler for GetRootRequest {
             }
 
             if Some(self.block_number) != current_head {
+                let head = current_head.expect("checked is_none above");
                 return Err(RpcErr::BadParams(format!(
-                    "UBT only has root for current head block {}. Requested block {}.",
-                    current_head.unwrap_or(0),
+                    "UBT only has root for current head block {head}. Requested block {}.",
                     self.block_number
                 )));
             }
@@ -52,7 +52,7 @@ impl RpcHandler for GetRootRequest {
         #[cfg(not(feature = "ubt"))]
         {
             let _ = (self, context);
-            Err(RpcErr::Internal(
+            Err(RpcErr::UnsuportedFork(
                 "UBT feature not enabled. Rebuild with --features ubt".to_string(),
             ))
         }
