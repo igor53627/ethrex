@@ -175,8 +175,6 @@ pub enum RpcNamespace {
     Web3,
     Net,
     Mempool,
-    Ubt,
-    Pir,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -223,8 +221,6 @@ pub fn resolve_namespace(maybe_namespace: &str, method: String) -> Result<RpcNam
         "net" => Ok(RpcNamespace::Net),
         // TODO: The namespace is set to match geth's namespace for compatibility, consider changing it in the future
         "txpool" => Ok(RpcNamespace::Mempool),
-        "ubt" => Ok(RpcNamespace::Ubt),
-        "pir" => Ok(RpcNamespace::Pir),
         _ => Err(RpcErr::MethodNotFound(method)),
     }
 }

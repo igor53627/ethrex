@@ -714,7 +714,9 @@ pub fn validate_block_body(
 
 /// Validates post-merge (Paris) body fields
 /// Ommers must be empty after The Merge (EIP-3675)
-pub fn validate_post_merge_block_body(block_body: &BlockBody) -> Result<(), InvalidBlockBodyError> {
+pub fn validate_post_merge_block_body(
+    block_body: &BlockBody,
+) -> Result<(), InvalidBlockBodyError> {
     if !block_body.ommers.is_empty() {
         return Err(InvalidBlockBodyError::OmmersIsNotEmpty);
     }
